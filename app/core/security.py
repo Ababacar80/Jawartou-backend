@@ -14,7 +14,6 @@ security = HTTPBearer()
 
 def hash_password(password: str) -> str:
     """Hasher un mot de passe avec bcrypt"""
-    # Tronquer à 72 bytes (limitation de bcrypt)
     password_bytes = password.encode('utf-8')
     if len(password_bytes) > 72:
         password = password_bytes[:72].decode('utf-8', errors='ignore')
@@ -32,10 +31,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     """Crée un token JWT"""
     to_encode = data.copy()
+
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(days=settings.JWT_EXPIRE_DAYS)
+        # Utiliser ACCESS_TOKEN_EXPIRE_MINUTES depuis config
+        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 

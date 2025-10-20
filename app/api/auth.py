@@ -1,96 +1,130 @@
-from fastapi import APIRouter, HTTPException, Depends, status
-from bson import ObjectId
-from passlib.context import CryptContext
-from datetime import timedelta
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, field_validator
 from app.core.database import get_database
-from app.core.security import create_access_token, get_current_user
-from app.models.schemas import UserRegister, UserLogin, UserResponse
+from app.core.security import hash_password, verify_password, create_access_token, get_current_user
+from datetime import datetime
+import re
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-def hash_password(password: str) -> str:
-    """Hasher un mot de passe"""
-    return pwd_context.hash(password)
+class RegisterRequest(BaseModel):
+    firstName: str
+    lastName: str
+    phone: str
+    password: str
+
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v):
+        # Nettoyer le numéro
+        cleaned = re.sub(r'[^\d+]', '', v)
+
+        # Accepter: 77XXXXXXXX (9 chiffres) ou +22177XXXXXXXX
+        if not re.match(r'^(\+221)?77[0-9]{7}$', cleaned):
+            raise ValueError('Numéro invalide (format: 77XXXXXXXX)')
+        return cleaned
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Vérifier un mot de passe"""
-    return pwd_context.verify(plain_password, hashed_password)
+class LoginRequest(BaseModel):
+    phone: str
+    password: str
+
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v):
+        cleaned = re.sub(r'[^\d+]', '', v)
+        if not re.match(r'^(\+221)?77[0-9]{7}$', cleaned):
+            raise ValueError('Numéro invalide (format: 77XXXXXXXX)')
+        return cleaned
 
 
 @router.post("/register")
-async def register(data: UserRegister):
+async def register(data: RegisterRequest):
     """Inscription d'un nouvel utilisateur"""
-    db = get_database()
+    try:
+        db = get_database()
 
-    # Vérifier si l'utilisateur existe déjà
-    existing_user = await db.users.find_one({"phone": data.phone})
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Cet utilisateur existe déjà")
+        # Vérifier si le numéro existe déjà
+        if await db.users.find_one({"phone": data.phone}):
+            raise HTTPException(status_code=400, detail="Ce numéro est déjà utilisé")
 
-    # Créer l'utilisateur
-    user_doc = {
-        "firstName": data.firstName,
-        "lastName": data.lastName,
-        "phone": data.phone,
-        "password": hash_password(data.password),
-        "role": "user",
-        "createdAt": __import__("datetime").datetime.now(),
-        "updatedAt": __import__("datetime").datetime.now()
-    }
-
-    result = await db.users.insert_one(user_doc)
-    user_id = str(result.inserted_id)
-
-    # Créer le token
-    token = create_access_token(user_id)
-
-    return {
-        "success": True,
-        "message": "Utilisateur créé avec succès",
-        "user": {
-            "id": user_id,
+        user_data = {
             "firstName": data.firstName,
             "lastName": data.lastName,
             "phone": data.phone,
-            "role": "user"
-        },
-        "token": token
-    }
+            "email": f"{data.phone}@example.com",
+            "password": hash_password(data.password),
+            "role": "user",
+            "country": "Senegal",
+            "createdAt": datetime.now(),
+            "updatedAt": datetime.now()
+        }
+
+        # Insertion dans la DB
+        result = await db.users.insert_one(user_data)
+        token = create_access_token({"id": str(result.inserted_id)})
+
+        return {
+            "success": True,
+            "token": token,
+            "user": {
+                "id": str(result.inserted_id),
+                "firstName": data.firstName,
+                "lastName": data.lastName,
+                "phone": data.phone,
+                "role": "user"
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur d'inscription: {str(e)}")
 
 
 @router.post("/login")
-async def login(data: UserLogin):
+async def login(data: LoginRequest):
     """Connexion d'un utilisateur"""
-    db = get_database()
+    try:
+        db = get_database()
 
-    # Chercher l'utilisateur
-    user = await db.users.find_one({"phone": data.phone})
-    if not user or not verify_password(data.password, user.get("password", "")):
-        raise HTTPException(status_code=401, detail="Identifiants invalides")
+        # Normaliser le numéro pour recherche
+        phone_cleaned = re.sub(r'[^\d+]', '', data.phone)
 
-    # Créer le token
-    user_id = str(user["_id"])
-    token = create_access_token(user_id)
+        # Préparer les variantes: +221 ou sans
+        if phone_cleaned.startswith("+221"):
+            phone_variants = [phone_cleaned, phone_cleaned[4:]]
+        else:
+            phone_variants = [phone_cleaned, f"+221{phone_cleaned}"]
 
-    return {
-        "success": True,
-        "message": "Connexion réussie",
-        "user": {
-            "id": user_id,
-            "firstName": user["firstName"],
-            "lastName": user["lastName"],
-            "phone": user["phone"],
-            "role": user.get("role", "user")
-        },
-        "token": token
-    }
+        # Chercher l'utilisateur
+        user = await db.users.find_one({"phone": {"$in": phone_variants}})
+
+        if not user or not verify_password(data.password, user.get("password", "")):
+            raise HTTPException(status_code=401, detail="Numéro ou mot de passe incorrect")
+
+        # Créer le token
+        token = create_access_token({"id": str(user["_id"])})
+
+        return {
+            "success": True,
+            "token": token,
+            "user": {
+                "id": str(user["_id"]),
+                "firstName": user["firstName"],
+                "lastName": user["lastName"],
+                "phone": user["phone"],
+                "role": user.get("role", "user")
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur de connexion: {str(e)}")
 
 
 @router.get("/me")
-async def get_profile(current_user: dict = Depends(get_current_user)):
+async def get_me(current_user: dict = Depends(get_current_user)):
     """Récupérer le profil de l'utilisateur connecté"""
     return {
         "success": True,
@@ -102,3 +136,9 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
             "role": current_user.get("role", "user")
         }
     }
+
+
+@router.get("/validate")
+async def validate_token(current_user: dict = Depends(get_current_user)):
+    """Valider le token"""
+    return {"success": True, "valid": True}
