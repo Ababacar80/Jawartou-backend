@@ -3,6 +3,7 @@ from bson import ObjectId
 from typing import Optional
 from app.core.database import get_database
 from app.core.security import get_current_admin
+from app.core.utils import serialize_doc
 from app.models.schemas import ProductCreate, ProductUpdate, ProductResponse
 
 router = APIRouter()
@@ -79,6 +80,35 @@ async def create_product(
     }
 
 
+@router.get("/featured")
+async def get_featured_products():
+    """
+    Retourne les produits marqués comme featured (à la une)
+    """
+    db = get_database()
+
+    # Récupérer les produits avec featured: true, limités à 12
+    cursor = db.products.find({
+        "featured": True,
+        "active": True
+    }).limit(12)
+
+    products = await cursor.to_list(length=12)
+
+    # Sérialiser les produits
+    serialized_products = []
+    for p in products:
+        if "_id" in p:
+            p["id"] = str(p["_id"])
+            del p["_id"]
+        serialized_products.append(serialize_doc(p))
+
+    return {
+        "success": True,
+        "products": serialized_products,
+        "count": len(serialized_products)
+    }
+
 @router.put("/{product_id}")
 async def update_product(
         product_id: str,
@@ -128,3 +158,4 @@ async def delete_product(
         "success": True,
         "message": "Produit supprimé"
     }
+
