@@ -1,161 +1,483 @@
-from fastapi import APIRouter, HTTPException, Depends
+# app/api/products.py - Version complète avec corrections
+
+from fastapi import APIRouter, HTTPException, Depends, Query
+from typing import Optional, Dict, List
 from bson import ObjectId
-from typing import Optional
+from bson.errors import InvalidId
+from slugify import slugify
 from app.core.database import get_database
 from app.core.security import get_current_admin
-from app.core.utils import serialize_doc
-from app.models.schemas import ProductCreate, ProductUpdate, ProductResponse
+from app.core.utils import serialize_product, calculate_total_stock
+from app.models.schemas import ProductCreate, ProductUpdate
+from datetime import datetime
 
 router = APIRouter()
 
+# ============================================
+# GET - RÉCUPÉRER LES PRODUITS
+# ============================================
 
 @router.get("")
 async def get_products(
         category: Optional[str] = None,
-        skip: int = 0,
-        limit: int = 20
+        subcategory: Optional[str] = None,
+        search: Optional[str] = None,
+        featured: Optional[bool] = None,
+        promotion: Optional[bool] = None,
+        page: int = Query(1, ge=1),
+        limit: int = Query(50, ge=1, le=2000)
 ):
-    """Récupérer tous les produits avec filtrage optionnel"""
-    db = get_database()
+    """
+    Récupère la liste des produits avec filtres
 
+    Paramètres:
+    - category: Filtre par catégorie (ex: "parfum", "vetement")
+    - subcategory: Filtre par sous-catégorie (ex: "50ml", "M")
+    - search: Recherche par nom ou description
+    - featured: Produits en vedette (true/false)
+    - promotion: Produits en promotion (true/false)
+    - page: Numéro de page (défaut: 1)
+    - limit: Nombre de résultats par page (défaut: 50, max: 2000)
+    """
+    db = get_database()
     query = {"active": True}
+
+    # ✅ Ajouter les filtres seulement s'ils sont fournis
     if category:
         query["category"] = category
+    if subcategory:
+        query["subcategory"] = subcategory
+    if search:
+        query["$or"] = [
+            {"name": {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}},
+            {"shortDescription": {"$regex": search, "$options": "i"}}
+        ]
+    if featured is not None:
+        query["featured"] = featured
+    if promotion is not None:
+        query["onPromotion"] = promotion
 
-    cursor = db.products.find(query).skip(skip).limit(limit)
-    products = await cursor.to_list(length=limit)
+    skip = (page - 1) * limit
 
-    for product in products:
-        product["id"] = str(product.pop("_id"))
+    print(f"🔍 Query MongoDB: {query}")
+    print(f"📄 Pagination: page={page}, limit={limit}, skip={skip}")
 
-    return {
-        "success": True,
-        "count": len(products),
-        "data": products
-    }
+    try:
+        cursor = db.products.find(query).sort("createdAt", -1).skip(skip).limit(limit)
+        products = await cursor.to_list(length=limit)
+        total = await db.products.count_documents(query)
+
+        print(f"✅ Trouvé {len(products)} produits (total: {total})")
+
+        # ✅ Sérialiser chaque produit
+        serialized_products = [serialize_product(p) for p in products]
+
+        # 🔍 Debug: afficher les 2 premiers
+        for p in serialized_products[:2]:
+            print(f"   📦 {p['name']}: prix={p['price']}F, stock={p['stockTotal']}, inStock={p['inStock']}")
+
+        return {
+            "success": True,
+            "data": serialized_products,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "pages": (total + limit - 1) // limit
+        }
+    except Exception as e:
+        print(f"❌ Erreur: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{product_id}")
 async def get_product(product_id: str):
-    """Récupérer un produit par ID"""
+    """Récupère un produit par son ID"""
     db = get_database()
 
-    if not ObjectId.is_valid(product_id):
-        raise HTTPException(status_code=400, detail="ID invalide")
+    try:
+        # Valider l'ObjectId
+        if not ObjectId.is_valid(product_id):
+            raise HTTPException(status_code=400, detail="ID produit invalide")
 
-    product = await db.products.find_one({"_id": ObjectId(product_id)})
+        product = await db.products.find_one({"_id": ObjectId(product_id)})
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="ID produit invalide")
 
     if not product:
         raise HTTPException(status_code=404, detail="Produit non trouvé")
 
-    product["id"] = str(product.pop("_id"))
+    # ✅ Sérialiser le produit
+    serialized_product = serialize_product(product)
+
+    print(f"✅ Produit trouvé: {serialized_product['name']}")
+    print(
+        f"   Prix: {serialized_product['price']}F | Stock: {serialized_product['stockTotal']} | En stock: {serialized_product['inStock']}")
 
     return {
         "success": True,
-        "data": product
+        "data": serialized_product
     }
 
+
+@router.get("/category/{category}")
+async def get_products_by_category(
+        category: str,
+        page: int = Query(1, ge=1),
+        limit: int = Query(50, ge=1, le=2000)
+):
+    """Récupère les produits d'une catégorie"""
+    db = get_database()
+
+    query = {"active": True, "category": category}
+    skip = (page - 1) * limit
+
+    try:
+        cursor = db.products.find(query).sort("createdAt", -1).skip(skip).limit(limit)
+        products = await cursor.to_list(length=limit)
+        total = await db.products.count_documents(query)
+
+        # ✅ Sérialiser chaque produit
+        serialized_products = [serialize_product(p) for p in products]
+
+        return {
+            "success": True,
+            "data": serialized_products,
+            "total": total,
+            "page": page,
+            "limit": limit
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# POST - CRÉER UN PRODUIT
+# ============================================
 
 @router.post("")
 async def create_product(
         data: ProductCreate,
-        current_admin: dict = Depends(get_current_admin)
+        admin=Depends(get_current_admin)
 ):
-    """Créer un nouveau produit (Admin uniquement)"""
-    db = get_database()
-
-    product_doc = {
-        **data.dict(),
-        "active": True,
-        "createdAt": __import__("datetime").datetime.now(),
-        "updatedAt": __import__("datetime").datetime.now()
-    }
-
-    result = await db.products.insert_one(product_doc)
-
-    return {
-        "success": True,
-        "message": "Produit créé avec succès",
-        "id": str(result.inserted_id)
-    }
-
-
-@router.get("/featured")
-async def get_featured_products():
     """
-    Retourne les produits marqués comme featured (à la une)
+    Crée un nouveau produit (Admin uniquement)
+
+    Exemple:
+    {
+        "name": "Parfum Marasi",
+        "description": "Extrait de Parfum...",
+        "price": 10000,
+        "category": "parfum",
+        "subcategory": "50ml",
+        "colors": ["Noir"],
+        "sizes": []
+    }
     """
     db = get_database()
 
-    # Récupérer les produits avec featured: true, limités à 12
-    cursor = db.products.find({
-        "featured": True,
-        "active": True
-    }).limit(12)
+    try:
+        product_dict = data.dict()
+        product_dict["slug"] = slugify(data.name)
+        product_dict["createdAt"] = datetime.now()
+        product_dict["updatedAt"] = datetime.now()
+        product_dict["active"] = True
 
-    products = await cursor.to_list(length=12)
+        # ✅ LOGIQUE DE CRÉATION DU STOCK
+        if "stock" not in product_dict or not product_dict["stock"]:
+            stock = {}
 
-    # Sérialiser les produits
-    serialized_products = []
-    for p in products:
-        if "_id" in p:
-            p["id"] = str(p["_id"])
-            del p["_id"]
-        serialized_products.append(serialize_doc(p))
+            if data.category == "vetement":
+                # Pour les vêtements: {"Noir": {"S": 0, "M": 0}, "Blanc": {"S": 0, "M": 0}}
+                for color in data.colors:
+                    stock[color] = {size: 0 for size in data.sizes}
+            else:
+                # Pour les accessoires/parfums: {"Noir": {"total": 0}, "Blanc": {"total": 0}}
+                for color in data.colors:
+                    stock[color] = {"total": 0}
 
-    return {
-        "success": True,
-        "products": serialized_products,
-        "count": len(serialized_products)
-    }
+            product_dict["stock"] = stock
+
+        print(f"📝 Création produit: {product_dict['name']}")
+        print(f"   Stock structure: {product_dict['stock']}")
+
+        result = await db.products.insert_one(product_dict)
+
+        new_product = await db.products.find_one({"_id": result.inserted_id})
+        serialized_product = serialize_product(new_product)
+
+        print(f"✅ Produit créé avec ID: {serialized_product['id']}")
+
+        return {
+            "success": True,
+            "data": serialized_product,
+            "message": "Produit créé avec succès"
+        }
+    except Exception as e:
+        print(f"❌ Erreur création produit: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# PUT - METTRE À JOUR UN PRODUIT
+# ============================================
 
 @router.put("/{product_id}")
 async def update_product(
         product_id: str,
         data: ProductUpdate,
-        current_admin: dict = Depends(get_current_admin)
+        admin=Depends(get_current_admin)
 ):
-    """Mettre à jour un produit (Admin uniquement)"""
+    """
+    Met à jour un produit (Admin uniquement)
+
+    Paramètres optionnels:
+    - name, description, price, promoPrice
+    - onPromotion, category, subcategory
+    - featured, colors, sizes, etc.
+    """
     db = get_database()
 
-    if not ObjectId.is_valid(product_id):
-        raise HTTPException(status_code=400, detail="ID invalide")
+    try:
+        if not ObjectId.is_valid(product_id):
+            raise HTTPException(status_code=400, detail="ID produit invalide")
 
-    update_data = data.dict(exclude_unset=True)
-    update_data["updatedAt"] = __import__("datetime").datetime.now()
+        # Vérifier que le produit existe
+        existing_product = await db.products.find_one({"_id": ObjectId(product_id)})
+        if not existing_product:
+            raise HTTPException(status_code=404, detail="Produit non trouvé")
 
-    result = await db.products.update_one(
-        {"_id": ObjectId(product_id)},
-        {"$set": update_data}
-    )
+        update_data = {k: v for k, v in data.dict().items() if v is not None}
+        update_data["updatedAt"] = datetime.now()
 
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Produit non trouvé")
+        # ✅ Si le slug n'est pas fourni, le générer du nom
+        if "name" in update_data and "slug" not in update_data:
+            update_data["slug"] = slugify(update_data["name"])
 
-    return {
-        "success": True,
-        "message": "Produit mis à jour"
+        print(f"✏️  Mise à jour produit {product_id}")
+        print(f"   Données: {update_data}")
+
+        result = await db.products.update_one(
+            {"_id": ObjectId(product_id)},
+            {"$set": update_data}
+        )
+
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Produit non trouvé")
+
+        # Récupérer le produit mis à jour
+        updated_product = await db.products.find_one({"_id": ObjectId(product_id)})
+        serialized_product = serialize_product(updated_product)
+
+        print(f"✅ Produit mis à jour: {serialized_product['name']}")
+
+        return {
+            "success": True,
+            "data": serialized_product,
+            "message": "Produit mis à jour avec succès"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erreur mise à jour: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# PUT - METTRE À JOUR LE STOCK
+# ============================================
+
+@router.put("/{product_id}/stock")
+async def update_product_stock(
+        product_id: str,
+        stock: Dict[str, Dict[str, int]],
+        admin=Depends(get_current_admin)
+):
+    """
+    Met à jour le stock d'un produit (Admin uniquement)
+
+    Exemples:
+
+    Vêtement:
+    {
+        "Noir": {"S": 10, "M": 15, "L": 8},
+        "Blanc": {"S": 5, "M": 12, "L": 7}
     }
 
+    Accessoire/Parfum:
+    {
+        "50ml": 25,
+        "100ml": 18
+    }
+
+    OU
+
+    {
+        "Noir": {"total": 25},
+        "Argent": {"total": 18}
+    }
+    """
+    db = get_database()
+
+    try:
+        if not ObjectId.is_valid(product_id):
+            raise HTTPException(status_code=400, detail="ID produit invalide")
+
+        # Vérifier que le produit existe
+        product = await db.products.find_one({"_id": ObjectId(product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Produit non trouvé")
+
+        print(f"📦 Mise à jour stock pour {product['name']}")
+        print(f"   Nouveau stock: {stock}")
+
+        # Mettre à jour le stock
+        result = await db.products.update_one(
+            {"_id": ObjectId(product_id)},
+            {"$set": {"stock": stock, "updatedAt": datetime.now()}}
+        )
+
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Produit non trouvé")
+
+        # Récupérer le produit mis à jour
+        updated_product = await db.products.find_one({"_id": ObjectId(product_id)})
+        serialized_product = serialize_product(updated_product)
+
+        print(f"✅ Stock mis à jour")
+        print(f"   Stock total: {serialized_product['stockTotal']} | En stock: {serialized_product['inStock']}")
+
+        return {
+            "success": True,
+            "data": serialized_product,
+            "message": "Stock mis à jour avec succès"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erreur mise à jour stock: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# DELETE - SUPPRIMER UN PRODUIT
+# ============================================
 
 @router.delete("/{product_id}")
 async def delete_product(
         product_id: str,
-        current_admin: dict = Depends(get_current_admin)
+        admin=Depends(get_current_admin)
 ):
-    """Supprimer un produit (Admin uniquement)"""
+    """Supprime un produit (Admin uniquement) - Soft delete"""
     db = get_database()
 
-    if not ObjectId.is_valid(product_id):
-        raise HTTPException(status_code=400, detail="ID invalide")
+    try:
+        if not ObjectId.is_valid(product_id):
+            raise HTTPException(status_code=400, detail="ID produit invalide")
 
-    result = await db.products.delete_one({"_id": ObjectId(product_id)})
+        print(f"🗑️  Suppression produit {product_id}")
 
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Produit non trouvé")
+        result = await db.products.update_one(
+            {"_id": ObjectId(product_id)},
+            {"$set": {"active": False, "updatedAt": datetime.now()}}
+        )
 
-    return {
-        "success": True,
-        "message": "Produit supprimé"
-    }
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Produit non trouvé")
 
+        print(f"✅ Produit supprimé (soft delete)")
+
+        return {
+            "success": True,
+            "message": "Produit supprimé avec succès"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erreur suppression: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# ENDPOINTS BONUS
+# ============================================
+
+@router.get("/featured/list")
+async def get_featured_products(limit: int = Query(20, ge=1, le=500)):
+    """Récupère les produits en vedette"""
+    db = get_database()
+
+    try:
+        query = {"active": True, "featured": True}
+        cursor = db.products.find(query).sort("createdAt", -1).limit(limit)
+        products = await cursor.to_list(length=limit)
+
+        serialized_products = [serialize_product(p) for p in products]
+
+        return {
+            "success": True,
+            "data": serialized_products,
+            "total": len(serialized_products)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/promotion/list")
+async def get_promotion_products(limit: int = Query(20, ge=1, le=500)):
+    """Récupère les produits en promotion"""
+    db = get_database()
+
+    try:
+        query = {"active": True, "onPromotion": True}
+        cursor = db.products.find(query).sort("createdAt", -1).limit(limit)
+        products = await cursor.to_list(length=limit)
+
+        serialized_products = [serialize_product(p) for p in products]
+
+        return {
+            "success": True,
+            "data": serialized_products,
+            "total": len(serialized_products)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/search")
+async def search_products(
+        query_text: str = Query(..., min_length=1),
+        page: int = Query(1, ge=1),
+        limit: int = Query(20, ge=1, le=500)
+):
+    """Recherche en texte complet"""
+    db = get_database()
+
+    try:
+        skip = (page - 1) * limit
+
+        search_query = {
+            "active": True,
+            "$or": [
+                {"name": {"$regex": query_text, "$options": "i"}},
+                {"description": {"$regex": query_text, "$options": "i"}},
+                {"shortDescription": {"$regex": query_text, "$options": "i"}},
+                {"category": {"$regex": query_text, "$options": "i"}}
+            ]
+        }
+
+        cursor = db.products.find(search_query).sort("_id", -1).skip(skip).limit(limit)
+        products = await cursor.to_list(length=limit)
+        total = await db.products.count_documents(search_query)
+
+        serialized_products = [serialize_product(p) for p in products]
+
+        return {
+            "success": True,
+            "data": serialized_products,
+            "total": total,
+            "page": page,
+            "limit": limit
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

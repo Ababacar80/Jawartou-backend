@@ -1,263 +1,362 @@
-from fastapi import APIRouter, HTTPException, Depends
-from bson import ObjectId
+# app/api/orders.py - Endpoints complets
+from fastapi import APIRouter, HTTPException, Depends, Query
+from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from bson import ObjectId
 from app.core.database import get_database
-from app.core.security import get_current_user, get_current_admin
-from app.models.schemas import OrderCreate
+from app.core.security import get_current_user
+from app.models.schemas import OrderStatus, PaymentStatus
 
 router = APIRouter()
 
 
-@router.post("")
+class CreateOrderRequest(BaseModel):
+    shippingAddress: str
+    paymentMethod: str = "wave"
+
+
+class OrderResponse(BaseModel):
+    id: str
+    userId: str
+    items: list
+    total: float
+    status: str
+    paymentStatus: str
+    shippingAddress: str
+    createdAt: str
+    updatedAt: str
+
+
+@router.post("/create")
 async def create_order(
-        data: OrderCreate,
-        current_user: dict = Depends(get_current_user)
+    data: CreateOrderRequest,
+    current_user: dict = Depends(get_current_user)
 ):
-    """Créer une nouvelle commande"""
+    """
+    Créer une commande à partir du panier
+    - Récupère le panier de l'utilisateur
+    - Crée la commande
+    - Vide le panier
+    """
     db = get_database()
     user_id = str(current_user["_id"])
 
-    # Valider que les items ne sont pas vides
-    if not data.items:
-        raise HTTPException(status_code=400, detail="La commande doit contenir au moins un article")
+    # 1. Récupérer le panier
+    cart = await db.carts.find_one({"user": user_id})
 
-    # Vérifier la disponibilité du stock
-    for item in data.items:
-        if not ObjectId.is_valid(item.productId):
-            raise HTTPException(status_code=400, detail=f"ID produit invalide: {item.productId}")
+    if not cart or not cart.get("items"):
+        raise HTTPException(status_code=400, detail="Le panier est vide")
 
-        product = await db.products.find_one({"_id": ObjectId(item.productId)})
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Produit non trouvé: {item.name}")
+    # 2. Calculer le total
+    total = sum(item["price"] * item["quantity"] for item in cart["items"])
 
-    # Créer la commande
-    order_doc = {
-        "userId": user_id,
-        "items": [item.dict() for item in data.items],
-        "total": data.total,
+    # 3. Créer la commande
+    order = {
+        "user": user_id,
+        "items": cart["items"],
+        "total": total,
+        "status": OrderStatus.PENDING.value,
+        "paymentStatus": PaymentStatus.PENDING.value,
         "shippingAddress": data.shippingAddress,
-        "status": "pending",
-        "paymentStatus": "unpaid",
+        "paymentMethod": data.paymentMethod,
         "createdAt": datetime.now(),
         "updatedAt": datetime.now()
     }
 
-    result = await db.orders.insert_one(order_doc)
-    order_id = str(result.inserted_id)
+    result = await db.orders.insert_one(order)
+    order["_id"] = result.inserted_id
 
-    # Vider le panier
+    # 4. Vider le panier
     await db.carts.update_one(
-        {"userId": user_id},
-        {"$set": {
-            "items": [],
-            "total": 0,
-            "updatedAt": datetime.now()
-        }}
+        {"user": user_id},
+        {"$set": {"items": [], "lastUpdated": datetime.now()}}
     )
 
     return {
         "success": True,
         "message": "Commande créée avec succès",
-        "data": {
-            "id": order_id,
+        "order": {
+            "id": str(order["_id"]),
             "userId": user_id,
-            "total": data.total,
-            "status": "pending",
-            "createdAt": datetime.now().isoformat()
+            "items": order["items"],
+            "total": order["total"],
+            "status": order["status"],
+            "paymentStatus": order["paymentStatus"],
+            "shippingAddress": order["shippingAddress"],
+            "createdAt": order["createdAt"].isoformat(),
+            "updatedAt": order["updatedAt"].isoformat()
         }
     }
 
 
 @router.get("")
 async def get_user_orders(
-        status: Optional[str] = None,
-        page: int = 1,
-        limit: int = 20,
-        current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    limit: int = Query(50, le=100),
+    skip: int = Query(0, ge=0)
 ):
-    """Récupérer les commandes de l'utilisateur"""
+    """
+    Récupérer toutes les commandes de l'utilisateur
+    """
     db = get_database()
     user_id = str(current_user["_id"])
 
-    query = {"userId": user_id}
-    if status:
-        query["status"] = status
-
-    skip = (page - 1) * limit
-    total_count = await db.orders.count_documents(query)
-
-    cursor = db.orders.find(query).sort("createdAt", -1).skip(skip).limit(limit)
+    # Récupérer les commandes
+    cursor = db.orders.find({"user": user_id}).skip(skip).limit(limit).sort("createdAt", -1)
     orders = await cursor.to_list(length=limit)
 
+    # Sérialiser
+    serialized_orders = []
     for order in orders:
-        order["id"] = str(order.pop("_id"))
+        serialized_orders.append({
+            "id": str(order["_id"]),
+            "userId": order["user"],
+            "items": order.get("items", []),
+            "total": order.get("total", 0),
+            "status": order.get("status"),
+            "paymentStatus": order.get("paymentStatus"),
+            "shippingAddress": order.get("shippingAddress", ""),
+            "createdAt": order.get("createdAt", datetime.now()).isoformat(),
+            "updatedAt": order.get("updatedAt", datetime.now()).isoformat()
+        })
 
     return {
         "success": True,
-        "count": len(orders),
-        "total": total_count,
-        "page": page,
-        "totalPages": (total_count + limit - 1) // limit,
-        "data": orders
+        "count": len(serialized_orders),
+        "orders": serialized_orders
     }
 
 
 @router.get("/{order_id}")
 async def get_order(
-        order_id: str,
-        current_user: dict = Depends(get_current_user)
+    order_id: str,
+    current_user: dict = Depends(get_current_user)
 ):
-    """Récupérer les détails d'une commande"""
+    """
+    Récupérer une commande spécifique
+    """
     db = get_database()
     user_id = str(current_user["_id"])
 
-    if not ObjectId.is_valid(order_id):
-        raise HTTPException(status_code=400, detail="ID invalide")
+    # Validation de l'ID
+    try:
+        obj_id = ObjectId(order_id)
+    except:
+        raise HTTPException(status_code=400, detail="ID de commande invalide")
 
-    order = await db.orders.find_one({"_id": ObjectId(order_id)})
+    # Récupérer la commande
+    order = await db.orders.find_one({"_id": obj_id, "user": user_id})
 
     if not order:
         raise HTTPException(status_code=404, detail="Commande non trouvée")
 
-    # Vérifier que c'est la commande de l'utilisateur
-    if order["userId"] != user_id:
-        raise HTTPException(status_code=403, detail="Accès refusé")
-
-    order["id"] = str(order.pop("_id"))
-
     return {
         "success": True,
-        "data": order
-    }
-
-
-@router.put("/{order_id}/cancel")
-async def cancel_order(
-        order_id: str,
-        current_user: dict = Depends(get_current_user)
-):
-    """Annuler une commande"""
-    db = get_database()
-    user_id = str(current_user["_id"])
-
-    if not ObjectId.is_valid(order_id):
-        raise HTTPException(status_code=400, detail="ID invalide")
-
-    order = await db.orders.find_one({"_id": ObjectId(order_id)})
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Commande non trouvée")
-
-    if order["userId"] != user_id:
-        raise HTTPException(status_code=403, detail="Accès refusé")
-
-    if order["status"] != "pending":
-        raise HTTPException(status_code=400, detail="Seules les commandes en attente peuvent être annulées")
-
-    await db.orders.update_one(
-        {"_id": ObjectId(order_id)},
-        {"$set": {
-            "status": "cancelled",
-            "updatedAt": datetime.now()
-        }}
-    )
-
-    return {
-        "success": True,
-        "message": "Commande annulée avec succès"
-    }
-
-
-# ============== ADMIN ROUTES ==============
-
-@router.get("/admin/all")
-async def get_all_orders(
-        status: Optional[str] = None,
-        limit: int = 100,
-        current_admin: dict = Depends(get_current_admin)
-):
-    """Récupérer toutes les commandes (Admin uniquement)"""
-    db = get_database()
-
-    query = {}
-    if status:
-        query["status"] = status
-
-    cursor = db.orders.find(query).sort("createdAt", -1).limit(limit)
-    orders = await cursor.to_list(length=limit)
-
-    for order in orders:
-        order["id"] = str(order.pop("_id"))
-
-    return {
-        "success": True,
-        "count": len(orders),
-        "data": orders
-    }
-
-
-@router.get("/admin/stats")
-async def get_order_stats(current_admin: dict = Depends(get_current_admin)):
-    """Statistiques sur les commandes (Admin uniquement)"""
-    db = get_database()
-
-    total_orders = await db.orders.count_documents({})
-    pending = await db.orders.count_documents({"status": "pending"})
-    processing = await db.orders.count_documents({"status": "processing"})
-    shipped = await db.orders.count_documents({"status": "shipped"})
-    delivered = await db.orders.count_documents({"status": "delivered"})
-    cancelled = await db.orders.count_documents({"status": "cancelled"})
-
-    total_revenue = await db.orders.aggregate([
-        {"$match": {"paymentStatus": "paid"}},
-        {"$group": {"_id": None, "total": {"$sum": "$total"}}}
-    ]).to_list(length=1)
-
-    return {
-        "success": True,
-        "data": {
-            "totalOrders": total_orders,
-            "totalRevenue": total_revenue[0]["total"] if total_revenue else 0,
-            "byStatus": {
-                "pending": pending,
-                "processing": processing,
-                "shipped": shipped,
-                "delivered": delivered,
-                "cancelled": cancelled
-            }
+        "order": {
+            "id": str(order["_id"]),
+            "userId": order["user"],
+            "items": order.get("items", []),
+            "total": order.get("total", 0),
+            "status": order.get("status"),
+            "paymentStatus": order.get("paymentStatus"),
+            "shippingAddress": order.get("shippingAddress", ""),
+            "createdAt": order.get("createdAt").isoformat(),
+            "updatedAt": order.get("updatedAt").isoformat()
         }
     }
 
 
-@router.put("/admin/{order_id}/status")
-async def update_order_status(
-        order_id: str,
-        new_status: str,
-        current_admin: dict = Depends(get_current_admin)
-):
-    """Mettre à jour le statut d'une commande (Admin uniquement)"""
+@router.get("")
+async def get_cart(current_user: dict = Depends(get_current_user)):
+    """
+    Récupérer le panier de l'utilisateur
+    """
     db = get_database()
+    user_id = str(current_user["_id"])
 
-    valid_statuses = ["pending", "processing", "shipped", "delivered", "cancelled"]
-    if new_status not in valid_statuses:
-        raise HTTPException(status_code=400, detail=f"Statut invalide. Valides: {valid_statuses}")
+    cart = await db.carts.find_one({"user": user_id})
 
-    if not ObjectId.is_valid(order_id):
-        raise HTTPException(status_code=400, detail="ID invalide")
+    if not cart:
+        return {
+            "success": True,
+            "cart": {
+                "items": [],
+                "total": 0,
+                "lastUpdated": datetime.now().isoformat()
+            }
+        }
 
-    result = await db.orders.update_one(
-        {"_id": ObjectId(order_id)},
-        {"$set": {
-            "status": new_status,
-            "updatedAt": datetime.now()
-        }}
-    )
-
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Commande non trouvée")
+    # Calculer le total
+    total = sum(item["price"] * item["quantity"] for item in cart.get("items", []))
 
     return {
         "success": True,
-        "message": f"Statut mis à jour à {new_status}"
+        "cart": {
+            "items": cart.get("items", []),
+            "total": total,
+            "lastUpdated": cart.get("lastUpdated", datetime.now()).isoformat()
+        }
     }
+
+
+# app/api/cart.py - Mise à jour avec les endpoints corrects
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
+from datetime import datetime
+from app.core.database import get_database
+from app.core.security import get_current_user
+from bson import ObjectId
+
+router = APIRouter()
+
+
+class AddToCartRequest(BaseModel):
+    productId: str
+    quantity: int = 1
+
+
+class UpdateCartRequest(BaseModel):
+    quantity: int
+
+
+@router.post("/add")
+async def add_to_cart(
+    data: AddToCartRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Ajouter un produit au panier
+    """
+    db = get_database()
+    user_id = str(current_user["_id"])
+
+    # Récupérer le produit
+    try:
+        product_id = ObjectId(data.productId)
+    except:
+        raise HTTPException(status_code=400, detail="ID produit invalide")
+
+    product = await db.products.find_one({"_id": product_id})
+    if not product:
+        raise HTTPException(status_code=404, detail="Produit non trouvé")
+
+    if product.get("stock", 0) < data.quantity:
+        raise HTTPException(status_code=400, detail="Stock insuffisant")
+
+    # Préparer l'item
+    cart_item = {
+        "productId": str(product["_id"]),
+        "name": product["name"],
+        "price": product.get("promoPrice", product["price"]),
+        "quantity": data.quantity,
+        "image": product.get("image", "")
+    }
+
+    # Ajouter au panier
+    await db.carts.update_one(
+        {"user": user_id},
+        {
+            "$push": {"items": cart_item},
+            "$set": {"lastUpdated": datetime.now()}
+        },
+        upsert=True
+    )
+
+    return {"success": True, "message": "Produit ajouté au panier"}
+
+
+@router.get("")
+async def get_cart(current_user: dict = Depends(get_current_user)):
+    """
+    Récupérer le panier
+    """
+    db = get_database()
+    user_id = str(current_user["_id"])
+
+    cart = await db.carts.find_one({"user": user_id})
+
+    if not cart:
+        cart = {"items": [], "user": user_id}
+
+    total = sum(item["price"] * item["quantity"] for item in cart.get("items", []))
+
+    return {
+        "success": True,
+        "cart": {
+            "items": cart.get("items", []),
+            "total": total,
+            "lastUpdated": cart.get("lastUpdated", datetime.now()).isoformat()
+        }
+    }
+
+
+@router.put("/update/{item_index}")
+async def update_cart_item(
+    item_index: int,
+    data: UpdateCartRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Mettre à jour la quantité d'un article
+    """
+    db = get_database()
+    user_id = str(current_user["_id"])
+
+    cart = await db.carts.find_one({"user": user_id})
+
+    if not cart or item_index >= len(cart.get("items", [])):
+        raise HTTPException(status_code=404, detail="Article non trouvé")
+
+    cart["items"][item_index]["quantity"] = data.quantity
+    cart["lastUpdated"] = datetime.now()
+
+    await db.carts.update_one(
+        {"user": user_id},
+        {"$set": {"items": cart["items"], "lastUpdated": cart["lastUpdated"]}}
+    )
+
+    return {"success": True, "message": "Article mis à jour"}
+
+
+@router.delete("/remove/{item_index}")
+async def remove_from_cart(
+    item_index: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Retirer un article du panier
+    """
+    db = get_database()
+    user_id = str(current_user["_id"])
+
+    cart = await db.carts.find_one({"user": user_id})
+
+    if not cart or item_index >= len(cart.get("items", [])):
+        raise HTTPException(status_code=404, detail="Article non trouvé")
+
+    cart["items"].pop(item_index)
+    cart["lastUpdated"] = datetime.now()
+
+    await db.carts.update_one(
+        {"user": user_id},
+        {"$set": {"items": cart["items"], "lastUpdated": cart["lastUpdated"]}}
+    )
+
+    return {"success": True, "message": "Article retiré"}
+
+
+@router.delete("/clear")
+async def clear_cart(current_user: dict = Depends(get_current_user)):
+    """
+    Vider le panier
+    """
+    db = get_database()
+    user_id = str(current_user["_id"])
+
+    await db.carts.update_one(
+        {"user": user_id},
+        {"$set": {"items": [], "lastUpdated": datetime.now()}},
+        upsert=True
+    )
+
+    return {"success": True, "message": "Panier vidé"}
