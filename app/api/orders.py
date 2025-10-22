@@ -1,4 +1,4 @@
-# app/api/orders.py - Endpoints complets
+# app/api/orders.py - UPDATED FOR JAWARTOU
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from datetime import datetime
@@ -6,94 +6,142 @@ from bson import ObjectId
 from app.core.database import get_database
 from app.core.security import get_current_user
 from app.models.schemas import OrderStatus, PaymentStatus
+import uuid
 
 router = APIRouter()
 
 
-class CreateOrderRequest(BaseModel):
-    shippingAddress: str
-    paymentMethod: str = "wave"
+# ============================================
+# MODELS
+# ============================================
+
+class OrderItem(BaseModel):
+    productId: str
+    name: str
+    quantity: int
+    image: str | None = None
+    price: float
+    size: str | None = None
+    color: str | None = None
 
 
-class OrderResponse(BaseModel):
-    id: str
-    userId: str
-    items: list
-    total: float
+class ShippingInfo(BaseModel):
+    firstName: str
+    lastName: str
+    phone: str
+    address: str
+    city: str
+    email: str
+    country: str
+
+
+class PaymentInfo(BaseModel):
+    paymentMethod: str
     status: str
-    paymentStatus: str
-    shippingAddress: str
-    createdAt: str
-    updatedAt: str
 
 
-@router.post("/create")
+class CreateOrderRequest(BaseModel):
+    items: list[OrderItem]
+    shippingInfo: ShippingInfo
+    paymentInfo: PaymentInfo
+    shippingMethod: str
+    subtotal: float
+    shippingCost: float
+    total: float
+    notes: str | None = None
+
+
+# ============================================
+# POST - CRÉER UNE COMMANDE (JAWARTOU)
+# ============================================
+
+@router.post("")
 async def create_order(
-    data: CreateOrderRequest,
-    current_user: dict = Depends(get_current_user)
+        data: CreateOrderRequest,
+        current_user: dict = Depends(get_current_user)
 ):
     """
-    Créer une commande à partir du panier
-    - Récupère le panier de l'utilisateur
-    - Crée la commande
-    - Vide le panier
+    Créer une nouvelle commande (Format Jawartou)
+
+    ✅ Accepte les items, shippingInfo, paymentInfo, etc.
+    ✅ Génère un numéro de commande unique
+    ✅ Sauvegarde en DB
+    ✅ Vide le panier
     """
     db = get_database()
     user_id = str(current_user["_id"])
 
-    # 1. Récupérer le panier
-    cart = await db.carts.find_one({"user": user_id})
+    try:
+        # Validation
+        if not data.items or len(data.items) == 0:
+            raise HTTPException(status_code=400, detail="La commande doit contenir au moins un article")
 
-    if not cart or not cart.get("items"):
-        raise HTTPException(status_code=400, detail="Le panier est vide")
+        # Générer un numéro de commande unique: CMD-XXXXX
+        order_number = f"CMD-{uuid.uuid4().hex[:8].upper()}"
 
-    # 2. Calculer le total
-    total = sum(item["price"] * item["quantity"] for item in cart["items"])
-
-    # 3. Créer la commande
-    order = {
-        "user": user_id,
-        "items": cart["items"],
-        "total": total,
-        "status": OrderStatus.PENDING.value,
-        "paymentStatus": PaymentStatus.PENDING.value,
-        "shippingAddress": data.shippingAddress,
-        "paymentMethod": data.paymentMethod,
-        "createdAt": datetime.now(),
-        "updatedAt": datetime.now()
-    }
-
-    result = await db.orders.insert_one(order)
-    order["_id"] = result.inserted_id
-
-    # 4. Vider le panier
-    await db.carts.update_one(
-        {"user": user_id},
-        {"$set": {"items": [], "lastUpdated": datetime.now()}}
-    )
-
-    return {
-        "success": True,
-        "message": "Commande créée avec succès",
-        "order": {
-            "id": str(order["_id"]),
-            "userId": user_id,
-            "items": order["items"],
-            "total": order["total"],
-            "status": order["status"],
-            "paymentStatus": order["paymentStatus"],
-            "shippingAddress": order["shippingAddress"],
-            "createdAt": order["createdAt"].isoformat(),
-            "updatedAt": order["updatedAt"].isoformat()
+        # Préparer les données
+        order = {
+            "orderNumber": order_number,
+            "user": user_id,
+            "items": [item.dict() for item in data.items],
+            "shippingInfo": data.shippingInfo.dict(),
+            "paymentInfo": data.paymentInfo.dict(),
+            "shippingMethod": data.shippingMethod,
+            "subtotal": data.subtotal,
+            "shippingCost": data.shippingCost,
+            "total": data.total,
+            "notes": data.notes or "",
+            "status": "pending",  # ✅ Utilise directement la string
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow()
         }
-    }
 
+        # Sauvegarder en DB
+        result = await db.orders.insert_one(order)
+        order["_id"] = result.inserted_id
+
+        print(f"✅ Commande créée: {order_number} | User: {user_id}")
+
+        # Vider le panier
+        await db.carts.update_one(
+            {"user": user_id},
+            {"$set": {"items": [], "lastUpdated": datetime.utcnow()}}
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "id": str(order["_id"]),
+                "orderNumber": order_number,
+                "items": order["items"],
+                "shippingInfo": order["shippingInfo"],
+                "total": order["total"],
+                "subtotal": order["subtotal"],
+                "shippingCost": order["shippingCost"],
+                "status": order["status"],
+                "paymentInfo": order["paymentInfo"],
+                "shippingMethod": order["shippingMethod"],
+                "createdAt": order["createdAt"].isoformat(),
+                "updatedAt": order["updatedAt"].isoformat()
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erreur création commande: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# GET - RÉCUPÉRER TOUTES LES COMMANDES DE L'UTILISATEUR
+# ============================================
 
 @router.get("")
 async def get_user_orders(
-    current_user: dict = Depends(get_current_user),
-    limit: int = Query(50, le=100),
-    skip: int = Query(0, ge=0)
+        current_user: dict = Depends(get_current_user),
+        limit: int = Query(50, le=100),
+        skip: int = Query(0, ge=0)
 ):
     """
     Récupérer toutes les commandes de l'utilisateur
@@ -101,36 +149,48 @@ async def get_user_orders(
     db = get_database()
     user_id = str(current_user["_id"])
 
-    # Récupérer les commandes
-    cursor = db.orders.find({"user": user_id}).skip(skip).limit(limit).sort("createdAt", -1)
-    orders = await cursor.to_list(length=limit)
+    try:
+        # Récupérer les commandes
+        cursor = db.orders.find({"user": user_id}).skip(skip).limit(limit).sort("createdAt", -1)
+        orders = await cursor.to_list(length=limit)
 
-    # Sérialiser
-    serialized_orders = []
-    for order in orders:
-        serialized_orders.append({
-            "id": str(order["_id"]),
-            "userId": order["user"],
-            "items": order.get("items", []),
-            "total": order.get("total", 0),
-            "status": order.get("status"),
-            "paymentStatus": order.get("paymentStatus"),
-            "shippingAddress": order.get("shippingAddress", ""),
-            "createdAt": order.get("createdAt", datetime.now()).isoformat(),
-            "updatedAt": order.get("updatedAt", datetime.now()).isoformat()
-        })
+        # Sérialiser
+        serialized_orders = []
+        for order in orders:
+            serialized_orders.append({
+                "id": str(order["_id"]),
+                "orderNumber": order.get("orderNumber", ""),
+                "userId": order["user"],
+                "items": order.get("items", []),
+                "shippingInfo": order.get("shippingInfo", {}),
+                "total": order.get("total", 0),
+                "subtotal": order.get("subtotal", 0),
+                "shippingCost": order.get("shippingCost", 0),
+                "status": order.get("status", "pending"),
+                "paymentInfo": order.get("paymentInfo", {}),
+                "shippingMethod": order.get("shippingMethod", "standard"),
+                "createdAt": order.get("createdAt", datetime.utcnow()).isoformat(),
+                "updatedAt": order.get("updatedAt", datetime.utcnow()).isoformat()
+            })
 
-    return {
-        "success": True,
-        "count": len(serialized_orders),
-        "orders": serialized_orders
-    }
+        return {
+            "success": True,
+            "count": len(serialized_orders),
+            "data": serialized_orders
+        }
+    except Exception as e:
+        print(f"❌ Erreur récupération commandes: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
+
+# ============================================
+# GET - RÉCUPÉRER UNE COMMANDE SPÉCIFIQUE
+# ============================================
 
 @router.get("/{order_id}")
 async def get_order(
-    order_id: str,
-    current_user: dict = Depends(get_current_user)
+        order_id: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Récupérer une commande spécifique
@@ -138,225 +198,93 @@ async def get_order(
     db = get_database()
     user_id = str(current_user["_id"])
 
-    # Validation de l'ID
     try:
-        obj_id = ObjectId(order_id)
-    except:
-        raise HTTPException(status_code=400, detail="ID de commande invalide")
+        # Validation de l'ID
+        try:
+            obj_id = ObjectId(order_id)
+        except:
+            raise HTTPException(status_code=400, detail="ID de commande invalide")
 
-    # Récupérer la commande
-    order = await db.orders.find_one({"_id": obj_id, "user": user_id})
+        # Récupérer la commande
+        order = await db.orders.find_one({"_id": obj_id, "user": user_id})
 
-    if not order:
-        raise HTTPException(status_code=404, detail="Commande non trouvée")
+        if not order:
+            raise HTTPException(status_code=404, detail="Commande non trouvée")
 
-    return {
-        "success": True,
-        "order": {
-            "id": str(order["_id"]),
-            "userId": order["user"],
-            "items": order.get("items", []),
-            "total": order.get("total", 0),
-            "status": order.get("status"),
-            "paymentStatus": order.get("paymentStatus"),
-            "shippingAddress": order.get("shippingAddress", ""),
-            "createdAt": order.get("createdAt").isoformat(),
-            "updatedAt": order.get("updatedAt").isoformat()
-        }
-    }
-
-
-@router.get("")
-async def get_cart(current_user: dict = Depends(get_current_user)):
-    """
-    Récupérer le panier de l'utilisateur
-    """
-    db = get_database()
-    user_id = str(current_user["_id"])
-
-    cart = await db.carts.find_one({"user": user_id})
-
-    if not cart:
         return {
             "success": True,
-            "cart": {
-                "items": [],
-                "total": 0,
-                "lastUpdated": datetime.now().isoformat()
+            "data": {
+                "id": str(order["_id"]),
+                "orderNumber": order.get("orderNumber", ""),
+                "userId": order["user"],
+                "items": order.get("items", []),
+                "shippingInfo": order.get("shippingInfo", {}),
+                "total": order.get("total", 0),
+                "subtotal": order.get("subtotal", 0),
+                "shippingCost": order.get("shippingCost", 0),
+                "status": order.get("status", "pending"),
+                "paymentInfo": order.get("paymentInfo", {}),
+                "shippingMethod": order.get("shippingMethod", "standard"),
+                "createdAt": order.get("createdAt", datetime.utcnow()).isoformat(),
+                "updatedAt": order.get("updatedAt", datetime.utcnow()).isoformat()
             }
         }
-
-    # Calculer le total
-    total = sum(item["price"] * item["quantity"] for item in cart.get("items", []))
-
-    return {
-        "success": True,
-        "cart": {
-            "items": cart.get("items", []),
-            "total": total,
-            "lastUpdated": cart.get("lastUpdated", datetime.now()).isoformat()
-        }
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erreur récupération commande: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# app/api/cart.py - Mise à jour avec les endpoints corrects
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-from datetime import datetime
-from app.core.database import get_database
-from app.core.security import get_current_user
-from bson import ObjectId
+# ============================================
+# PATCH - METTRE À JOUR LE STATUT D'UNE COMMANDE (ADMIN)
+# ============================================
 
-router = APIRouter()
-
-
-class AddToCartRequest(BaseModel):
-    productId: str
-    quantity: int = 1
-
-
-class UpdateCartRequest(BaseModel):
-    quantity: int
-
-
-@router.post("/add")
-async def add_to_cart(
-    data: AddToCartRequest,
-    current_user: dict = Depends(get_current_user)
+@router.patch("/{order_id}")
+async def update_order_status(
+        order_id: str,
+        status: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """
-    Ajouter un produit au panier
+    Mettre à jour le statut d'une commande (Admin uniquement)
     """
     db = get_database()
-    user_id = str(current_user["_id"])
 
-    # Récupérer le produit
+    # Vérifier que c'est un admin
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Accès refusé")
+
     try:
-        product_id = ObjectId(data.productId)
-    except:
-        raise HTTPException(status_code=400, detail="ID produit invalide")
+        # Validation de l'ID et du statut
+        try:
+            obj_id = ObjectId(order_id)
+        except:
+            raise HTTPException(status_code=400, detail="ID de commande invalide")
 
-    product = await db.products.find_one({"_id": product_id})
-    if not product:
-        raise HTTPException(status_code=404, detail="Produit non trouvé")
+        if status not in ["pending", "processing", "shipped", "delivered", "cancelled"]:
+            raise HTTPException(status_code=400, detail="Statut invalide")
 
-    if product.get("stock", 0) < data.quantity:
-        raise HTTPException(status_code=400, detail="Stock insuffisant")
+        # Mettre à jour
+        result = await db.orders.update_one(
+            {"_id": obj_id},
+            {
+                "$set": {
+                    "status": status,
+                    "updatedAt": datetime.utcnow()
+                }
+            }
+        )
 
-    # Préparer l'item
-    cart_item = {
-        "productId": str(product["_id"]),
-        "name": product["name"],
-        "price": product.get("promoPrice", product["price"]),
-        "quantity": data.quantity,
-        "image": product.get("image", "")
-    }
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Commande non trouvée")
 
-    # Ajouter au panier
-    await db.carts.update_one(
-        {"user": user_id},
-        {
-            "$push": {"items": cart_item},
-            "$set": {"lastUpdated": datetime.now()}
-        },
-        upsert=True
-    )
-
-    return {"success": True, "message": "Produit ajouté au panier"}
-
-
-@router.get("")
-async def get_cart(current_user: dict = Depends(get_current_user)):
-    """
-    Récupérer le panier
-    """
-    db = get_database()
-    user_id = str(current_user["_id"])
-
-    cart = await db.carts.find_one({"user": user_id})
-
-    if not cart:
-        cart = {"items": [], "user": user_id}
-
-    total = sum(item["price"] * item["quantity"] for item in cart.get("items", []))
-
-    return {
-        "success": True,
-        "cart": {
-            "items": cart.get("items", []),
-            "total": total,
-            "lastUpdated": cart.get("lastUpdated", datetime.now()).isoformat()
+        return {
+            "success": True,
+            "message": f"Statut mis à jour: {status}"
         }
-    }
-
-
-@router.put("/update/{item_index}")
-async def update_cart_item(
-    item_index: int,
-    data: UpdateCartRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Mettre à jour la quantité d'un article
-    """
-    db = get_database()
-    user_id = str(current_user["_id"])
-
-    cart = await db.carts.find_one({"user": user_id})
-
-    if not cart or item_index >= len(cart.get("items", [])):
-        raise HTTPException(status_code=404, detail="Article non trouvé")
-
-    cart["items"][item_index]["quantity"] = data.quantity
-    cart["lastUpdated"] = datetime.now()
-
-    await db.carts.update_one(
-        {"user": user_id},
-        {"$set": {"items": cart["items"], "lastUpdated": cart["lastUpdated"]}}
-    )
-
-    return {"success": True, "message": "Article mis à jour"}
-
-
-@router.delete("/remove/{item_index}")
-async def remove_from_cart(
-    item_index: int,
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Retirer un article du panier
-    """
-    db = get_database()
-    user_id = str(current_user["_id"])
-
-    cart = await db.carts.find_one({"user": user_id})
-
-    if not cart or item_index >= len(cart.get("items", [])):
-        raise HTTPException(status_code=404, detail="Article non trouvé")
-
-    cart["items"].pop(item_index)
-    cart["lastUpdated"] = datetime.now()
-
-    await db.carts.update_one(
-        {"user": user_id},
-        {"$set": {"items": cart["items"], "lastUpdated": cart["lastUpdated"]}}
-    )
-
-    return {"success": True, "message": "Article retiré"}
-
-
-@router.delete("/clear")
-async def clear_cart(current_user: dict = Depends(get_current_user)):
-    """
-    Vider le panier
-    """
-    db = get_database()
-    user_id = str(current_user["_id"])
-
-    await db.carts.update_one(
-        {"user": user_id},
-        {"$set": {"items": [], "lastUpdated": datetime.now()}},
-        upsert=True
-    )
-
-    return {"success": True, "message": "Panier vidé"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erreur mise à jour statut: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
