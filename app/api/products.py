@@ -155,6 +155,7 @@ async def get_products_by_category(
 # POST - CRÉER UN PRODUIT
 # ============================================
 
+
 @router.post("")
 async def create_product(
         data: ProductCreate,
@@ -169,7 +170,7 @@ async def create_product(
         "description": "Extrait de Parfum...",
         "price": 10000,
         "category": "parfum",
-        "subcategory": "50ml",
+        "subcategory": "Homme",
         "colors": ["Noir"],
         "sizes": []
     }
@@ -183,22 +184,32 @@ async def create_product(
         product_dict["updatedAt"] = datetime.now()
         product_dict["active"] = True
 
-        # ✅ LOGIQUE DE CRÉATION DU STOCK
+        # ✅ LOGIQUE DE CRÉATION DU STOCK CORRIGÉE
         if "stock" not in product_dict or not product_dict["stock"]:
             stock = {}
 
-            if data.category == "vetement":
-                # Pour les vêtements: {"Noir": {"S": 0, "M": 0}, "Blanc": {"S": 0, "M": 0}}
+            # ========== CHEVILLÈRE (couleur + taille + quantité) ==========
+            if data.category == "sport" and any(
+                    sub in data.subcategory.lower() for sub in ["chevillère", "chevillere"]):
+                # Chevillère: {"Noir": {"S": 0, "M": 0, "L": 0}, "Blanc": {"S": 0, ...}}
                 for color in data.colors:
                     stock[color] = {size: 0 for size in data.sizes}
-            else:
-                # Pour les accessoires/parfums: {"Noir": {"total": 0}, "Blanc": {"total": 0}}
+
+            # ========== BANDE ADHÉSIF / KINÉSIOLOGIES (couleur + quantité) ==========
+            elif data.category == "sport" and any(sub in data.subcategory.lower() for sub in ["bande", "kinesio"]):
+                # Bande: {"Noir": {"total": 0}, "Blanc": {"total": 0}}
                 for color in data.colors:
                     stock[color] = {"total": 0}
+
+            # ========== PARFUM / BIEN-ÊTRE / INFORMATIQUE (juste quantité) ==========
+            else:
+                # Parfum/Bien-être/Informatique: {"total": 0}
+                stock["total"] = 0
 
             product_dict["stock"] = stock
 
         print(f"📝 Création produit: {product_dict['name']}")
+        print(f"   Catégorie: {data.category} | Sous-cat: {data.subcategory}")
         print(f"   Stock structure: {product_dict['stock']}")
 
         result = await db.products.insert_one(product_dict)
@@ -216,7 +227,6 @@ async def create_product(
     except Exception as e:
         print(f"❌ Erreur création produit: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============================================
 # PUT - METTRE À JOUR UN PRODUIT

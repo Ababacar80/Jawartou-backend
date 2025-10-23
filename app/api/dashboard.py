@@ -4,6 +4,7 @@ app/api/dashboard.py - Endpoint pour le dashboard admin
 
 from fastapi import APIRouter, Depends, HTTPException
 from bson import ObjectId
+from datetime import datetime, timedelta
 from app.core.security import get_current_admin
 from app.core.database import get_database
 
@@ -121,7 +122,6 @@ async def get_orders_stats(current_user: dict = Depends(get_current_admin)):
         by_status = await db.orders.aggregate(pipeline).to_list(None)
 
         # Commandes ce mois-ci
-        from datetime import datetime, timedelta
         now = datetime.utcnow()
         start_of_month = datetime(now.year, now.month, 1)
 
@@ -167,7 +167,6 @@ async def get_users_stats(current_user: dict = Depends(get_current_admin)):
         by_role = await db.users.aggregate(pipeline).to_list(None)
 
         # Utilisateurs cette semaine
-        from datetime import datetime, timedelta
         week_ago = datetime.utcnow() - timedelta(days=7)
 
         new_users_week = await db.users.count_documents({

@@ -50,6 +50,9 @@ class CreateOrderRequest(BaseModel):
     total: float
     notes: str | None = None
 
+class UpdateOrderStatusRequest(BaseModel):
+    status: str
+
 
 # ============================================
 # POST - CRÉER UNE COMMANDE (JAWARTOU)
@@ -240,10 +243,11 @@ async def get_order(
 # PATCH - METTRE À JOUR LE STATUT D'UNE COMMANDE (ADMIN)
 # ============================================
 
+
 @router.patch("/{order_id}")
 async def update_order_status(
         order_id: str,
-        status: str,
+        data: UpdateOrderStatusRequest,
         current_user: dict = Depends(get_current_user)
 ):
     """
@@ -262,7 +266,7 @@ async def update_order_status(
         except:
             raise HTTPException(status_code=400, detail="ID de commande invalide")
 
-        if status not in ["pending", "processing", "shipped", "delivered", "cancelled"]:
+        if data.status not in ["pending", "processing", "shipped", "delivered", "cancelled"]:
             raise HTTPException(status_code=400, detail="Statut invalide")
 
         # Mettre à jour
@@ -270,7 +274,7 @@ async def update_order_status(
             {"_id": obj_id},
             {
                 "$set": {
-                    "status": status,
+                    "status": data.status,
                     "updatedAt": datetime.utcnow()
                 }
             }
@@ -281,7 +285,7 @@ async def update_order_status(
 
         return {
             "success": True,
-            "message": f"Statut mis à jour: {status}"
+            "message": f"Statut mis à jour: {data.status}"
         }
     except HTTPException:
         raise
