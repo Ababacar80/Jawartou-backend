@@ -10,6 +10,8 @@ from app.core.security import get_current_admin
 from app.core.utils import serialize_product, calculate_total_stock
 from app.models.schemas import ProductCreate, ProductUpdate
 from datetime import datetime
+from typing import Dict, Any
+
 
 router = APIRouter()
 
@@ -240,11 +242,7 @@ async def update_product(
 ):
     """
     Met à jour un produit (Admin uniquement)
-
-    Paramètres optionnels:
-    - name, description, price, promoPrice
-    - onPromotion, category, subcategory
-    - featured, colors, sizes, etc.
+    ✅ Auto-sync du stock si les couleurs/tailles changent
     """
     db = get_database()
 
@@ -263,6 +261,60 @@ async def update_product(
         # ✅ Si le slug n'est pas fourni, le générer du nom
         if "name" in update_data and "slug" not in update_data:
             update_data["slug"] = slugify(update_data["name"])
+
+        # ✅ NOUVEAU : Si les couleurs ou tailles changent, syncer le stock !
+        if "colors" in update_data or "sizes" in update_data:
+            new_colors = update_data.get("colors", existing_product.get("colors", []))
+            new_sizes = update_data.get("sizes", existing_product.get("sizes", []))
+            old_stock = existing_product.get("stock", {})
+            category = existing_product.get("category", "")
+            subcategory = existing_product.get("subcategory", "")
+
+            print(f"🔄 Syncing stock avec nouvelles couleurs/tailles")
+            print(f"   Catégorie: {category} | Sous-cat: {subcategory}")
+            print(f"   Anciennes couleurs: {existing_product.get('colors', [])}")
+            print(f"   Nouvelles couleurs: {new_colors}")
+
+            # Reconstruire le stock en fonction du type de produit
+            new_stock = {}
+
+            # COULEUR + TAILLE (pour vêtements à tailles)
+            # ⚠️ À ADAPTER SI VOUS AVEZ DES VÊTEMENTS PLUS TARD
+            if new_sizes and len(new_sizes) > 0:
+                for color in new_colors:
+                    # Récupérer l'ancien stock pour cette couleur s'il existe
+                    old_color_stock = old_stock.get(color, {})
+                    new_stock[color] = {}
+
+                    for size in new_sizes:
+                        # Garder l'ancienne valeur si elle existe, sinon 0
+                        new_stock[color][size] = old_color_stock.get(size, 0)
+
+                    print(f"   ✅ {color}: {list(new_stock[color].keys())}")
+
+            # COULEUR + QUANTITÉ (Bande adhésif, Kinésiologies, Chevillère, etc.)
+            elif new_colors and len(new_colors) > 0:
+                for color in new_colors:
+                    # Récupérer l'ancienne quantité ou 0
+                    old_qty = 0
+                    if color in old_stock:
+                        # Ancien format (peut être un nombre ou {total: N})
+                        old_qty = old_stock[color].get("total", 0) if isinstance(old_stock[color], dict) else old_stock[
+                            color]
+
+                    new_stock[color] = {"total": old_qty}
+                    print(f"   ✅ {color}: {old_qty} unités")
+
+            # JUSTE QUANTITÉ (Parfum, Bien-être, Informatique sans couleur)
+            else:
+                # Garder le total existant
+                total_qty = 0
+                if "total" in old_stock:
+                    total_qty = old_stock["total"]
+                new_stock["total"] = total_qty
+                print(f"   ✅ Stock total conservé: {total_qty}")
+
+            update_data["stock"] = new_stock
 
         print(f"✏️  Mise à jour produit {product_id}")
         print(f"   Données: {update_data}")
@@ -292,7 +344,6 @@ async def update_product(
         print(f"❌ Erreur mise à jour: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ============================================
 # PUT - METTRE À JOUR LE STOCK
 # ============================================
@@ -300,7 +351,7 @@ async def update_product(
 @router.put("/{product_id}/stock")
 async def update_product_stock(
         product_id: str,
-        stock: Dict[str, Dict[str, int]],
+        stock: Dict[str, Any],  # ← Accepte tous les formats
         admin=Depends(get_current_admin)
 ):
     """
@@ -308,23 +359,21 @@ async def update_product_stock(
 
     Exemples:
 
-    Vêtement:
+    Simple (Parfum/Bien-être/Informatique):
     {
-        "Noir": {"S": 10, "M": 15, "L": 8},
-        "Blanc": {"S": 5, "M": 12, "L": 7}
+        "total": 50
     }
 
-    Accessoire/Parfum:
-    {
-        "50ml": 25,
-        "100ml": 18
-    }
-
-    OU
-
+    Couleur + quantité (Accessoires):
     {
         "Noir": {"total": 25},
         "Argent": {"total": 18}
+    }
+
+    Couleur + taille + quantité (Vêtements):
+    {
+        "Noir": {"S": 10, "M": 15, "L": 8},
+        "Blanc": {"S": 5, "M": 12, "L": 7}
     }
     """
     db = get_database()
@@ -367,7 +416,6 @@ async def update_product_stock(
     except Exception as e:
         print(f"❌ Erreur mise à jour stock: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============================================
 # DELETE - SUPPRIMER UN PRODUIT
