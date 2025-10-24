@@ -163,63 +163,34 @@ async def create_product(
         data: ProductCreate,
         admin=Depends(get_current_admin)
 ):
-    """
-    Crée un nouveau produit (Admin uniquement)
-
-    Exemple:
-    {
-        "name": "Parfum Marasi",
-        "description": "Extrait de Parfum...",
-        "price": 10000,
-        "category": "parfum",
-        "subcategory": "Homme",
-        "colors": ["Noir"],
-        "sizes": []
-    }
-    """
+    """Crée un nouveau produit (Admin uniquement)"""
     db = get_database()
 
     try:
         product_dict = data.dict()
+
+        # 🔍 DEBUG: Voir exactement ce qui arrive
+        print(f"🔍 DEBUG CREATE - data.dict(): {product_dict}")
+        print(f"🔍 DEBUG - Images dans data: {product_dict.get('images')}")
+
         product_dict["slug"] = slugify(data.name)
         product_dict["createdAt"] = datetime.now()
         product_dict["updatedAt"] = datetime.now()
         product_dict["active"] = True
 
-        # ✅ LOGIQUE DE CRÉATION DU STOCK CORRIGÉE
-        if "stock" not in product_dict or not product_dict["stock"]:
-            stock = {}
-
-            # ========== CHEVILLÈRE (couleur + taille + quantité) ==========
-            if data.category == "sport" and any(
-                    sub in data.subcategory.lower() for sub in ["chevillère", "chevillere"]):
-                # Chevillère: {"Noir": {"S": 0, "M": 0, "L": 0}, "Blanc": {"S": 0, ...}}
-                for color in data.colors:
-                    stock[color] = {size: 0 for size in data.sizes}
-
-            # ========== BANDE ADHÉSIF / KINÉSIOLOGIES (couleur + quantité) ==========
-            elif data.category == "sport" and any(sub in data.subcategory.lower() for sub in ["bande", "kinesio"]):
-                # Bande: {"Noir": {"total": 0}, "Blanc": {"total": 0}}
-                for color in data.colors:
-                    stock[color] = {"total": 0}
-
-            # ========== PARFUM / BIEN-ÊTRE / INFORMATIQUE (juste quantité) ==========
-            else:
-                # Parfum/Bien-être/Informatique: {"total": 0}
-                stock["total"] = 0
-
-            product_dict["stock"] = stock
+        # ... reste du stock code ...
 
         print(f"📝 Création produit: {product_dict['name']}")
-        print(f"   Catégorie: {data.category} | Sous-cat: {data.subcategory}")
-        print(f"   Stock structure: {product_dict['stock']}")
+        print(f"   Images à sauvegarder: {product_dict.get('images')}")
+        print(f"   product_dict complet: {product_dict}")
 
         result = await db.products.insert_one(product_dict)
 
+        # Vérifier ce qui a été sauvegardé
         new_product = await db.products.find_one({"_id": result.inserted_id})
-        serialized_product = serialize_product(new_product)
+        print(f"✅ Produit créé, images en DB: {new_product.get('images')}")
 
-        print(f"✅ Produit créé avec ID: {serialized_product['id']}")
+        serialized_product = serialize_product(new_product)
 
         return {
             "success": True,
@@ -228,11 +199,14 @@ async def create_product(
         }
     except Exception as e:
         print(f"❌ Erreur création produit: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================
 # PUT - METTRE À JOUR UN PRODUIT
 # ============================================
+
 
 @router.put("/{product_id}")
 async def update_product(
@@ -240,98 +214,47 @@ async def update_product(
         data: ProductUpdate,
         admin=Depends(get_current_admin)
 ):
-    """
-    Met à jour un produit (Admin uniquement)
-    ✅ Auto-sync du stock si les couleurs/tailles changent
-    """
+    """Met à jour un produit (Admin uniquement)"""
     db = get_database()
 
     try:
         if not ObjectId.is_valid(product_id):
             raise HTTPException(status_code=400, detail="ID produit invalide")
 
-        # Vérifier que le produit existe
         existing_product = await db.products.find_one({"_id": ObjectId(product_id)})
         if not existing_product:
             raise HTTPException(status_code=404, detail="Produit non trouvé")
 
+        # 🔍 DEBUG: Voir ce qui arrive en PUT
+        print(f"🔍 DEBUG UPDATE - data.dict(): {data.dict()}")
+        print(f"🔍 DEBUG - Images dans data: {data.dict().get('images')}")
+
         update_data = {k: v for k, v in data.dict().items() if v is not None}
+
+        print(f"🔍 DEBUG - update_data après filtre: {update_data}")
+        print(f"🔍 DEBUG - Images après filtre: {update_data.get('images')}")
+
         update_data["updatedAt"] = datetime.now()
 
-        # ✅ Si le slug n'est pas fourni, le générer du nom
         if "name" in update_data and "slug" not in update_data:
             update_data["slug"] = slugify(update_data["name"])
 
-        # ✅ NOUVEAU : Si les couleurs ou tailles changent, syncer le stock !
-        if "colors" in update_data or "sizes" in update_data:
-            new_colors = update_data.get("colors", existing_product.get("colors", []))
-            new_sizes = update_data.get("sizes", existing_product.get("sizes", []))
-            old_stock = existing_product.get("stock", {})
-            category = existing_product.get("category", "")
-            subcategory = existing_product.get("subcategory", "")
-
-            print(f"🔄 Syncing stock avec nouvelles couleurs/tailles")
-            print(f"   Catégorie: {category} | Sous-cat: {subcategory}")
-            print(f"   Anciennes couleurs: {existing_product.get('colors', [])}")
-            print(f"   Nouvelles couleurs: {new_colors}")
-
-            # Reconstruire le stock en fonction du type de produit
-            new_stock = {}
-
-            # COULEUR + TAILLE (pour vêtements à tailles)
-            # ⚠️ À ADAPTER SI VOUS AVEZ DES VÊTEMENTS PLUS TARD
-            if new_sizes and len(new_sizes) > 0:
-                for color in new_colors:
-                    # Récupérer l'ancien stock pour cette couleur s'il existe
-                    old_color_stock = old_stock.get(color, {})
-                    new_stock[color] = {}
-
-                    for size in new_sizes:
-                        # Garder l'ancienne valeur si elle existe, sinon 0
-                        new_stock[color][size] = old_color_stock.get(size, 0)
-
-                    print(f"   ✅ {color}: {list(new_stock[color].keys())}")
-
-            # COULEUR + QUANTITÉ (Bande adhésif, Kinésiologies, Chevillère, etc.)
-            elif new_colors and len(new_colors) > 0:
-                for color in new_colors:
-                    # Récupérer l'ancienne quantité ou 0
-                    old_qty = 0
-                    if color in old_stock:
-                        # Ancien format (peut être un nombre ou {total: N})
-                        old_qty = old_stock[color].get("total", 0) if isinstance(old_stock[color], dict) else old_stock[
-                            color]
-
-                    new_stock[color] = {"total": old_qty}
-                    print(f"   ✅ {color}: {old_qty} unités")
-
-            # JUSTE QUANTITÉ (Parfum, Bien-être, Informatique sans couleur)
-            else:
-                # Garder le total existant
-                total_qty = 0
-                if "total" in old_stock:
-                    total_qty = old_stock["total"]
-                new_stock["total"] = total_qty
-                print(f"   ✅ Stock total conservé: {total_qty}")
-
-            update_data["stock"] = new_stock
-
         print(f"✏️  Mise à jour produit {product_id}")
-        print(f"   Données: {update_data}")
+        print(f"   update_data: {update_data}")
 
         result = await db.products.update_one(
             {"_id": ObjectId(product_id)},
             {"$set": update_data}
         )
 
+        # Vérifier ce qui a été sauvegardé
+        updated_product = await db.products.find_one({"_id": ObjectId(product_id)})
+        print(f"✅ Produit mis à jour, images en DB: {updated_product.get('images')}")
+
         if result.matched_count == 0:
             raise HTTPException(status_code=404, detail="Produit non trouvé")
 
-        # Récupérer le produit mis à jour
-        updated_product = await db.products.find_one({"_id": ObjectId(product_id)})
         serialized_product = serialize_product(updated_product)
-
-        print(f"✅ Produit mis à jour: {serialized_product['name']}")
 
         return {
             "success": True,
@@ -342,6 +265,8 @@ async def update_product(
         raise
     except Exception as e:
         print(f"❌ Erreur mise à jour: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================

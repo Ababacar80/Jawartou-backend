@@ -46,9 +46,19 @@ class ProductCreate(BaseModel):
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
     price: Optional[float] = None
+    promoPrice: Optional[float] = None
     description: Optional[str] = None
+    image: Optional[str] = None
+    images: Optional[List[str]] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    colors: Optional[List[str]] = None
+    sizes: Optional[List[str]] = None
+    featured: Optional[bool] = None
+    onPromotion: Optional[bool] = None
     stock: Optional[Dict[str, Dict[str, int]]] = None
     active: Optional[bool] = None
+
 
 
 class ProductResponse(BaseModel):
