@@ -1,17 +1,19 @@
-# app/api/products.py - Version complète avec corrections
+# app/api/products.py - Version complète avec corrections promoPrice
 
-from fastapi import APIRouter, HTTPException, Depends, Query
-from typing import Optional, Dict, List
+from datetime import datetime
+from typing import Optional, Dict, Any
+
 from bson import ObjectId
 from bson.errors import InvalidId
+from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from slugify import slugify
+
 from app.core.database import get_database
 from app.core.security import get_current_admin
-from app.core.utils import serialize_product, calculate_total_stock
+from app.core.utils import serialize_product
 from app.models.schemas import ProductCreate, ProductUpdate
-from datetime import datetime
-from typing import Dict, Any
-
 
 router = APIRouter()
 
@@ -77,8 +79,9 @@ async def get_products(
 
         # 🔍 Debug: afficher les 2 premiers
         for p in serialized_products[:2]:
-            print(f"   📦 {p['name']}: prix={p['price']}F, stock={p['stockTotal']}, inStock={p['inStock']}")
+            print(f"   📦 {p['name']}: prix={p['price']}F, promo={p.get('promoPrice')}, stock={p['stockTotal']}")
 
+        # ✅ Retourner un dict simple (FastAPI le sérialise automatiquement)
         return {
             "success": True,
             "data": serialized_products,
@@ -87,8 +90,11 @@ async def get_products(
             "limit": limit,
             "pages": (total + limit - 1) // limit
         }
+
     except Exception as e:
         print(f"❌ Erreur: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -113,8 +119,7 @@ async def get_product(product_id: str):
     serialized_product = serialize_product(product)
 
     print(f"✅ Produit trouvé: {serialized_product['name']}")
-    print(
-        f"   Prix: {serialized_product['price']}F | Stock: {serialized_product['stockTotal']} | En stock: {serialized_product['inStock']}")
+    print(f"   Prix: {serialized_product['price']}F | PromoPrice: {serialized_product.get('promoPrice')} | Stock: {serialized_product['stockTotal']}")
 
     return {
         "success": True,
@@ -157,7 +162,6 @@ async def get_products_by_category(
 # POST - CRÉER UN PRODUIT
 # ============================================
 
-
 @router.post("")
 async def create_product(
         data: ProductCreate,
@@ -169,26 +173,39 @@ async def create_product(
     try:
         product_dict = data.dict()
 
-        # 🔍 DEBUG: Voir exactement ce qui arrive
-        print(f"🔍 DEBUG CREATE - data.dict(): {product_dict}")
-        print(f"🔍 DEBUG - Images dans data: {product_dict.get('images')}")
+        print(f"🔍 DEBUG CREATE - Payload reçu: {product_dict}")
 
         product_dict["slug"] = slugify(data.name)
         product_dict["createdAt"] = datetime.now()
         product_dict["updatedAt"] = datetime.now()
         product_dict["active"] = True
 
-        # ... reste du stock code ...
+        # ✅ FIX: Gérer promoPrice correctement
+        # Si onPromotion = False, s'assurer que promoPrice = None
+        if not product_dict.get("onPromotion", False):
+            print("⚠️ Produit créé sans promo → promoPrice = None")
+            product_dict["promoPrice"] = None
+        else:
+            # Si onPromotion = True, vérifier qu'on a un prix promo
+            if not product_dict.get("promoPrice"):
+                print("⚠️ ATTENTION: Promo activée mais pas de prix promo!")
+                product_dict["promoPrice"] = None
+
+        # Initialiser le stock vide si pas fourni
+        if "stock" not in product_dict:
+            product_dict["stock"] = {}
 
         print(f"📝 Création produit: {product_dict['name']}")
-        print(f"   Images à sauvegarder: {product_dict.get('images')}")
-        print(f"   product_dict complet: {product_dict}")
+        print(f"   promoPrice: {product_dict.get('promoPrice')}")
+        print(f"   onPromotion: {product_dict.get('onPromotion')}")
 
+        # ✅ Insertion en DB
         result = await db.products.insert_one(product_dict)
 
-        # Vérifier ce qui a été sauvegardé
+        # 🔍 Vérifier ce qui a été créé
         new_product = await db.products.find_one({"_id": result.inserted_id})
-        print(f"✅ Produit créé, images en DB: {new_product.get('images')}")
+        print(f"✅ Produit créé avec succès")
+        print(f"   promoPrice en DB: {new_product.get('promoPrice')}")
 
         serialized_product = serialize_product(new_product)
 
@@ -197,16 +214,17 @@ async def create_product(
             "data": serialized_product,
             "message": "Produit créé avec succès"
         }
+
     except Exception as e:
-        print(f"❌ Erreur création produit: {str(e)}")
+        print(f"❌ Erreur création: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # ============================================
 # PUT - METTRE À JOUR UN PRODUIT
 # ============================================
-
 
 @router.put("/{product_id}")
 async def update_product(
@@ -225,49 +243,77 @@ async def update_product(
         if not existing_product:
             raise HTTPException(status_code=404, detail="Produit non trouvé")
 
-        # 🔍 DEBUG: Voir ce qui arrive en PUT
-        print(f"🔍 DEBUG UPDATE - data.dict(): {data.dict()}")
-        print(f"🔍 DEBUG - Images dans data: {data.dict().get('images')}")
+        print(f"🔍 DEBUG UPDATE - Payload reçu: {data.dict()}")
 
-        update_data = {k: v for k, v in data.dict().items() if v is not None}
+        # Construire update_data - garder SEULEMENT les valeurs non-None
+        update_data = {}
+        for key, value in data.dict().items():
+            if value is not None:
+                update_data[key] = value
 
-        print(f"🔍 DEBUG - update_data après filtre: {update_data}")
-        print(f"🔍 DEBUG - Images après filtre: {update_data.get('images')}")
+        print(f"   Avant traitement promo: {update_data}")
+        print(f"   promoPrice dans payload: {update_data.get('promoPrice')}")
+        print(f"   onPromotion dans payload: {update_data.get('onPromotion')}")
+
+        # ✅ IMPORTANT: Gérer la relation onPromotion ↔ promoPrice
+        if "onPromotion" in update_data:
+            if update_data["onPromotion"] is True:
+                # Si on active la promo, s'assurer qu'il y a un prix promo
+                if "promoPrice" not in update_data or update_data["promoPrice"] is None:
+                    print("⚠️ Promo activée mais pas de prix promo → garder l'ancien")
+                else:
+                    print(f"✅ Promo activée avec promoPrice: {update_data['promoPrice']}")
+            else:
+                # Si on désactive la promo, forcer promoPrice = None
+                print("🔥 Promo désactivée → forcer promoPrice à None")
+                update_data["promoPrice"] = None
+        elif "promoPrice" in update_data:
+            # Si on modifie promoPrice SANS modifier onPromotion
+            print(f"📝 PromoPrice modifié à {update_data['promoPrice']} sans changer onPromotion")
 
         update_data["updatedAt"] = datetime.now()
 
-        if "name" in update_data and "slug" not in update_data:
+        if "name" in update_data:
             update_data["slug"] = slugify(update_data["name"])
 
-        print(f"✏️  Mise à jour produit {product_id}")
-        print(f"   update_data: {update_data}")
+        print(f"✏️  Mise à jour: {list(update_data.keys())}")
+        print(f"   promoPrice final: {update_data.get('promoPrice')}")
+        print(f"   onPromotion final: {update_data.get('onPromotion')}")
 
         result = await db.products.update_one(
             {"_id": ObjectId(product_id)},
             {"$set": update_data}
         )
 
-        # Vérifier ce qui a été sauvegardé
-        updated_product = await db.products.find_one({"_id": ObjectId(product_id)})
-        print(f"✅ Produit mis à jour, images en DB: {updated_product.get('images')}")
-
         if result.matched_count == 0:
             raise HTTPException(status_code=404, detail="Produit non trouvé")
 
+        updated_product = await db.products.find_one({"_id": ObjectId(product_id)})
         serialized_product = serialize_product(updated_product)
 
-        return {
+        print(f"✅ Produit mis à jour")
+        print(f"   promoPrice en DB: {updated_product.get('promoPrice')}")
+        print(f"   onPromotion en DB: {updated_product.get('onPromotion')}")
+        print(f"   promoPrice sérialisé: {serialized_product.get('promoPrice')}")
+
+        response_data = {
             "success": True,
             "data": serialized_product,
             "message": "Produit mis à jour avec succès"
         }
-    except HTTPException:
-        raise
+
+        # ✅ Utiliser jsonable_encoder pour convertir datetime → string
+        return JSONResponse(
+            content=jsonable_encoder(response_data),
+            status_code=200
+        )
+
     except Exception as e:
-        print(f"❌ Erreur mise à jour: {str(e)}")
+        print(f"❌ Erreur: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================
 # PUT - METTRE À JOUR LE STOCK
@@ -276,7 +322,7 @@ async def update_product(
 @router.put("/{product_id}/stock")
 async def update_product_stock(
         product_id: str,
-        stock: Dict[str, Any],  # ← Accepte tous les formats
+        stock: Dict[str, Any],
         admin=Depends(get_current_admin)
 ):
     """
@@ -341,6 +387,7 @@ async def update_product_stock(
     except Exception as e:
         print(f"❌ Erreur mise à jour stock: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================
 # DELETE - SUPPRIMER UN PRODUIT
