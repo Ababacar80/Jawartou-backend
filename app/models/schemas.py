@@ -36,17 +36,29 @@ class ProductCreate(BaseModel):
     price: float
     category: str
     colors: List[str]
+
+    # ✅ Champs optionnels pour création
     sizes: Optional[List[str]] = []
     images: Optional[List[str]] = []
+    image: Optional[str] = None  # ✅ Image principale
     stock: Optional[Dict[str, Dict[str, int]]] = None
+    shortDescription: Optional[str] = None  # ✅ Description courte
+    subcategory: Optional[str] = None  # ✅ Sous-catégorie
+    featured: Optional[bool] = False  # ✅ En vedette
+    onPromotion: Optional[bool] = False  # ✅ En promotion
+    promoPrice: Optional[float] = None  # ✅ Prix en promotion
+    active: Optional[bool] = True  # ✅ Actif/Inactif
+    material: Optional[str] = None  # ✅ Matériau
+    careInstructions: Optional[str] = None  # ✅ Instructions d'entretien
 
 
-# ✅ UNIQUE ProductUpdate avec TOUS les champs
+# ✅ ProductUpdate avec TOUS les champs
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
-    price: Optional[float] = None
-    promoPrice: Optional[float] = None  # ✅ IMPORTANT
     description: Optional[str] = None
+    shortDescription: Optional[str] = None  # ✅ Description courte
+    price: Optional[float] = None
+    promoPrice: Optional[float] = None
     image: Optional[str] = None
     images: Optional[List[str]] = None
     category: Optional[str] = None
@@ -54,9 +66,11 @@ class ProductUpdate(BaseModel):
     colors: Optional[List[str]] = None
     sizes: Optional[List[str]] = None
     featured: Optional[bool] = None
-    onPromotion: Optional[bool] = None  # ✅ IMPORTANT
+    onPromotion: Optional[bool] = None
     stock: Optional[Dict[str, Dict[str, int]]] = None
     active: Optional[bool] = None
+    material: Optional[str] = None  # ✅ Matériau
+    careInstructions: Optional[str] = None  # ✅ Instructions d'entretien
 
 
 class ProductResponse(BaseModel):
@@ -74,7 +88,6 @@ class ProductResponse(BaseModel):
 
     class Config:
         populate_by_name = True
-
 
 # ============== CART ==============
 class CartItem(BaseModel):
